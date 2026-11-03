@@ -42,6 +42,9 @@ import '../../widgets/playback/trickplay_tile_image.dart';
 import '../../../playback/html_video_backend.dart';
 import '../../../playback/aether_backend.dart';
 import '../../../playback/media_kit_player_backend.dart';
+import '../../../jav/jav_code.dart';
+import '../../../jav/jav_player_tools.dart';
+import '../../../jav/jav_subtitle_ball.dart';
 import '../../../playback/mpv_letterbox_crop.dart';
 import '../../widgets/aether_video_view.dart';
 import '../../../playback/playback_lifecycle_handler.dart';
@@ -171,6 +174,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   static const _scrubSeekConvergeTimeout = Duration(seconds: 2);
 
   final _manager = GetIt.instance<PlaybackManager>();
+
+  /// moonfin-jav: subtitle ball, hold-to-speed-up and step-seek hotkeys.
+  JavPlayerTools? _jav;
   // media_kit isn't registered on platforms that run a different backend, so
   // ask the container rather than listing them.
   final MediaKitPlayerBackend? _backend =
@@ -743,6 +749,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   @override
   void initState() {
     super.initState();
+    if (!PlatformDetection.isTV) {
+      _jav = JavPlayerTools(
+        manager: _manager,
+        seekBy: (ms) => _seekRelative(ms),
+        codeProvider: _javCode,
+      );
+      unawaited(_jav!.init());
+    }
     _cinemaSkip = CinemaSkipController(onSkip: _manager.nextInQueue);
     _configureCinemaSkip();
     _syncCinemaSkip();
@@ -999,6 +1013,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   @override
   void dispose() {
+    _jav?.dispose();
     if (kIsWeb) unawaited(BrowserContextMenu.enableContextMenu());
     _cancelPopAfterBackKeyUp?.call();
     _trickplayLoadGeneration++;
@@ -3407,7 +3422,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     unawaited(syncSecondarySubtitleStyle(_manager, _prefs));
   }
 
+  /// 番号 of the playing item, for the subtitle search.
+  String _javCode() {
+    final item = _queue.currentItem;
+    if (item is AggregatedItem) return javCodeForItem(item.rawData);
+    if (item is Map) return javCodeForItem(item.cast<String, dynamic>());
+    return '';
+  }
+
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    final jav = _jav;
+    if (jav != null) {
+      // Typing in the subtitle panel: these keys are text, not shortcuts.
+      if (jav.panelFocused) return KeyEventResult.ignored;
+      if (!_isCurrentPreroll && jav.handleKey(event)) {
+        return KeyEventResult.handled;
+      }
+    }
     if (_isCurrentPreroll) {
       if (_routeCovered && _cinemaSkip.enabled) return KeyEventResult.ignored;
       // A desktop keyboard uses the regular Escape and dismiss shortcuts.
@@ -4049,6 +4080,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       _buildSkipIndicatorOverlay(),
                       if (_temporarySpeedActive && !PlatformDetection.isTV)
                         _buildTemporarySpeedOverlay(),
+                      if (_jav != null && !hideOsdForPreroll)
+                        Positioned.fill(
+                          child: JavSubtitleBall(
+                            tools: _jav!,
+                            showBall: _controlsVisible && !_isOsdLocked,
+                            onPanelClosed: _overlayFocus.requestFocus,
+                          ),
+                        ),
                       if (_isOsdLocked && !hideOsdForPreroll)
                         _buildLockedOverlay(),
                       if (_isSkipSegmentButtonVisible)

@@ -1,0 +1,63 @@
+name: moonfin-jav (Windows)
+
+# The fork's own pipeline: check the jav changes fast on Linux, then build the
+# Windows installer and publish it as the rolling "jav-latest" pre-release.
+on:
+  push:
+    branches: [jav]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: jav-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.2'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos lib/jav test/jav lib/ui/screens/playback/video_player_screen.dart
+      - name: Unit tests
+        run: flutter test test/jav
+
+  windows:
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+      - name: Build installer
+        shell: pwsh
+        run: .\build-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moonfin-jav-windows
+          path: Moonfin_Windows_v*.exe
+          if-no-files-found: error
+      - name: Publish jav-latest pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $exe = Get-ChildItem -Filter "Moonfin_Windows_v*.exe" | Select-Object -First 1
+          $notes = "moonfin-jav 自动构建（分支 jav，提交 ${{ github.sha }}）。下载 exe 安装即可。"
+          gh release delete jav-latest --yes --cleanup-tag 2>$null
+          gh release create jav-latest $exe.FullName --prerelease --target ${{ github.sha }} --title "moonfin-jav 最新构建" --notes $notes
