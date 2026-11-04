@@ -130,13 +130,17 @@ void main() {
       expect(seen.single['token'], 'tok');
       expect(seen.single['ua'], _ua); // the link is signed for this UA
 
-      // mpv opening a file: header, index at the end, playback, a seek - all at once.
-      final reads = await Future.wait([
-        _get(local, 'bytes=0-'),
-        _get(local, 'bytes=${_size - 300000}-'),
-        _get(local, 'bytes=3000000-3999999'),
-        _get(local, 'bytes=7777777-'),
-      ]);
+      // mpv opening a file: header, index at the end, playback, a seek. It reads
+      // through one connection at a time (a new request ends the older one).
+      final reads = <Uint8List>[];
+      for (final range in [
+        'bytes=0-',
+        'bytes=${_size - 300000}-',
+        'bytes=3000000-3999999',
+        'bytes=7777777-',
+      ]) {
+        reads.add(await _get(local, range));
+      }
       expect(reads[0], data);
       expect(reads[1], Uint8List.sublistView(data, _size - 300000));
       expect(reads[2], Uint8List.sublistView(data, 3000000, 4000000));
