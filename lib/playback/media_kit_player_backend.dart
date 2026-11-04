@@ -26,6 +26,7 @@ import 'mpv_frame_sampler.dart';
 import 'pending_subtitle_choice.dart';
 import 'secondary_subtitle_position.dart';
 import 'server_transcode_capabilities.dart';
+import '../jav/jav_stream_proxy.dart';
 
 class _ParsedMpvConfCacheEntry {
   final DateTime modified;
@@ -909,7 +910,19 @@ class MediaKitPlayerBackend extends PlayerBackend
     );
     final subtitleGeneration = _subtitleSelectionGeneration;
     final secondaryGeneration = _secondarySubtitleGeneration;
-    final media = mediaForPayload(url, payload);
+    // moonfin-jav: a stream the Emby gateway redirects to the 115 CDN plays
+    // through the loopback proxy that keeps 115's connection limit.
+    final rawHeaders = payload['headers'];
+    final playUrl = await JavStreamProxy.instance.wrap(
+      url,
+      headers: {
+        if (rawHeaders is Map)
+          for (final e in rawHeaders.entries)
+            if (e.key != null && e.value != null) '${e.key}': '${e.value}',
+      },
+    );
+    if (!_ownsPlayback(generation)) return;
+    final media = mediaForPayload(playUrl, payload);
     _currentUrl = media.uri;
     _isStale = true;
     _embeddedCaptionTracks = const [];
