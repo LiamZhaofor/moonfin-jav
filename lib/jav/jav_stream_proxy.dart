@@ -158,10 +158,11 @@ class JavStreamProxy {
     if (s.size != null && index * chunkSize >= s.size!) return Uint8List(0);
     if (!await _acquire(demand: demand, alive: alive ?? () => true)) return null;
     // While this waited for a slot, someone else may have fetched it.
-    final again = s.cache[index] ?? s.inflight[index];
-    if (again != null) {
+    final cachedNow = s.cache[index];
+    final runningNow = s.inflight[index];
+    if (cachedNow != null || runningNow != null) {
       _release();
-      return again;
+      return cachedNow ?? await runningNow;
     }
     final future = _download(s, index).whenComplete(_release);
     s.inflight[index] = future;
