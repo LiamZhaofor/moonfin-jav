@@ -28,7 +28,7 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: Analyze
-        run: flutter analyze --no-fatal-infos lib/jav test/jav lib/ui/screens/playback/video_player_screen.dart
+        run: flutter analyze --no-fatal-infos lib/jav test/jav lib/ui/screens/playback/video_player_screen.dart lib/preference/user_preferences.dart
       - name: Unit tests
         run: flutter test test/jav
 

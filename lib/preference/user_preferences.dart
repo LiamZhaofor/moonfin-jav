@@ -153,6 +153,27 @@ class UserPreferences extends ChangeNotifier {
     _seedClockFormatFromSystem();
     _migrateScreensaverPreferences();
     _migrateSystemImePreference();
+    _applyJavHomeLayout();
+  }
+
+  static final _javHomeLayoutApplied = Preference(
+    key: 'jav_home_layout_v1',
+    defaultValue: false,
+  );
+
+  // moonfin-jav: Home as rows of posters under the top navbar, without the
+  // full-screen media bar and backdrop. The defaults below give new installs
+  // that; this switches an existing install over once, after which whatever
+  // the user picks in Settings stays.
+  void _applyJavHomeLayout() {
+    if (_store.get(_javHomeLayoutApplied)) return;
+    _store.set(getEffectivePreference(mediaBarMode), mediaBarModeOff);
+    _store.set(getEffectivePreference(homeBackdropEnabled), false);
+    if (!PlatformDetection.useMobileUi) {
+      _store.set(getEffectivePreference(homeRowsStyle), HomeRowsStyle.v2);
+      _store.set(getEffectivePreference(navbarPosition), NavbarPosition.top);
+    }
+    _store.set(_javHomeLayoutApplied, true);
   }
 
   // Carry over the pre-rename jellyseerr* preference keys to their seerr* names.
@@ -1302,7 +1323,7 @@ class UserPreferences extends ChangeNotifier {
 
   static final homeBackdropEnabled = Preference(
     key: 'pref_show_home_backdrop',
-    defaultValue: true,
+    defaultValue: false, // moonfin-jav: black Home, posters only
   );
 
   static final homeBackdropStyle = Preference(
@@ -2997,9 +3018,8 @@ class UserPreferences extends ChangeNotifier {
 
   static final mediaBarMode = Preference(
     key: 'mediaBarMode',
-    defaultValue: PlatformDetection.useMobileUi
-        ? mediaBarModeGallery
-        : mediaBarModeMoonfin,
+    // moonfin-jav: no full-screen media bar on Home; rows start under the navbar.
+    defaultValue: mediaBarModeOff,
   );
 
   static final mediaBarContentType = Preference(
