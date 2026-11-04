@@ -58,10 +58,11 @@ class JavStreamProxy {
   final _sessions = LinkedHashMap<String, _Session>();
   int _nextId = 0;
 
-  // Upstream slots: chunk requests a player waits for go first, read-ahead
-  // only takes a slot that is free right now.
+  // Upstream slots: chunk requests a player waits for go first, newest first
+  // (after a seek only the new position matters); read-ahead only takes a
+  // slot that is free right now.
   int _busy = 0;
-  final _waiters = Queue<Completer<void>>();
+  final _waiters = <_Waiter>[];
 
   /// Upstream requests currently running (for tests and diagnostics).
   int get activeUpstream => _busy;
@@ -116,29 +117,37 @@ class JavStreamProxy {
     return _isCloud(target) ? target : null;
   }
 
-  Future<bool> _acquire({required bool demand}) async {
+  Future<bool> _acquire({required bool demand, required bool Function() alive}) async {
     if (_busy < maxUpstream) {
       _busy++;
       return true;
     }
     if (!demand) return false;
-    final waiter = Completer<void>();
+    final waiter = _Waiter(alive);
     _waiters.add(waiter);
-    await waiter.future; // the slot is handed over by _release
-    return true;
+    return waiter.done.future; // true: the slot was handed over by _release
   }
 
   void _release() {
-    if (_waiters.isNotEmpty) {
-      _waiters.removeFirst().complete();
-    } else {
-      _busy--;
+    while (_waiters.isNotEmpty) {
+      final w = _waiters.removeLast();
+      if (w.alive()) {
+        w.done.complete(true);
+        return;
+      }
+      w.done.complete(false); // its reader is gone (mpv seeked away)
     }
+    _busy--;
   }
 
   /// Chunk [index] of [s], from the cache, an identical request already
   /// running, or the CDN. Null only for a read-ahead that found no free slot.
-  Future<Uint8List?> _chunk(_Session s, int index, {required bool demand}) async {
+  Future<Uint8List?> _chunk(
+    _Session s,
+    int index, {
+    required bool demand,
+    bool Function()? alive,
+  }) async {
     final cached = s.cache.remove(index);
     if (cached != null) {
       s.cache[index] = cached; // most recently used
@@ -147,7 +156,13 @@ class JavStreamProxy {
     final running = s.inflight[index];
     if (running != null) return running;
     if (s.size != null && index * chunkSize >= s.size!) return Uint8List(0);
-    if (!await _acquire(demand: demand)) return null;
+    if (!await _acquire(demand: demand, alive: alive ?? () => true)) return null;
+    // While this waited for a slot, someone else may have fetched it.
+    final again = s.cache[index] ?? s.inflight[index];
+    if (again != null) {
+      _release();
+      return again;
+    }
     final future = _download(s, index).whenComplete(_release);
     s.inflight[index] = future;
     try {
@@ -264,21 +279,37 @@ class JavStreamProxy {
       res.contentLength = end - start + 1;
       if (req.method == 'HEAD') return;
 
-      var pos = start;
-      while (pos <= end) {
-        final index = pos ~/ chunkSize;
-        final data = await _chunk(s, index, demand: true);
-        if (data == null || data.isEmpty) break;
-        // Keep the next chunks coming while mpv chews on this one.
-        for (var ahead = 1; ahead <= 3; ahead++) {
-          unawaited(_chunk(s, index + ahead, demand: false).catchError((_) => null));
+      // mpv reads a file through one connection at a time: a new request
+      // means it seeked, and whatever the older ones still wanted is moot.
+      // (Writing to a connection mpv closed does not reliably fail, so
+      // without this an old reader could keep both upstream slots busy.)
+      final reader = _Reader();
+      for (final old in s.readers) {
+        old.alive = false;
+      }
+      s.readers.add(reader);
+      unawaited(res.done.then((_) {}, onError: (_) {}).whenComplete(() => reader.alive = false));
+      bool alive() => reader.alive;
+      try {
+        var pos = start;
+        while (pos <= end && reader.alive) {
+          final index = pos ~/ chunkSize;
+          final data = await _chunk(s, index, demand: true, alive: alive);
+          if (data == null || data.isEmpty || !reader.alive) break;
+          // Keep the next chunks coming while mpv chews on this one.
+          for (var ahead = 1; ahead <= 3; ahead++) {
+            unawaited(_chunk(s, index + ahead, demand: false).catchError((_) => null));
+          }
+          final offset = pos - index * chunkSize;
+          if (offset >= data.length) break;
+          final take = math.min(data.length - offset, end - pos + 1);
+          res.add(Uint8List.sublistView(data, offset, offset + take));
+          await res.flush();
+          pos += take;
         }
-        final offset = pos - index * chunkSize;
-        if (offset >= data.length) break;
-        final take = math.min(data.length - offset, end - pos + 1);
-        res.add(Uint8List.sublistView(data, offset, offset + take));
-        await res.flush(); // throws once mpv has hung up (a seek): stop here
-        pos += take;
+      } finally {
+        reader.alive = false;
+        s.readers.remove(reader);
       }
     } catch (_) {
       // mpv closed the connection, or the CDN failed for good.
@@ -288,6 +319,17 @@ class JavStreamProxy {
       } catch (_) {}
     }
   }
+}
+
+class _Waiter {
+  _Waiter(this.alive);
+
+  final bool Function() alive;
+  final done = Completer<bool>();
+}
+
+class _Reader {
+  bool alive = true;
 }
 
 /// The CDN said no for good (as opposed to a network error worth retrying).
@@ -311,4 +353,5 @@ class _Session {
   final cache = LinkedHashMap<int, Uint8List>();
   int cachedBytes = 0;
   final inflight = <int, Future<Uint8List>>{};
+  final readers = <_Reader>[];
 }

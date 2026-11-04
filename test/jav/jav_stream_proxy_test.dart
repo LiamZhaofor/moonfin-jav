@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -23,6 +24,7 @@ class _FakeCdn {
   int refusals = 0;
   int forcePmt = 0; // answer the next N requests with "pmt"
   bool expired = false;
+  Duration delay = const Duration(milliseconds: 20);
 
   static Future<_FakeCdn> start(Uint8List data) async {
     final cdn = _FakeCdn(await HttpServer.bind(InternetAddress.loopbackIPv4, 0), data);
@@ -58,7 +60,7 @@ class _FakeCdn {
         ..set(HttpHeaders.contentRangeHeader, 'bytes $start-$end/${data.length}')
         ..contentType = ContentType('video', 'mp4');
       res.contentLength = end - start + 1;
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await Future<void>.delayed(delay);
       res.add(Uint8List.sublistView(data, start, end + 1));
     } finally {
       active--;
@@ -153,6 +155,50 @@ void main() {
       final fresh = await _get(local, 'bytes=200-299');
       expect(fresh, Uint8List.sublistView(data, 200, 300));
       expect(seen.length, 2);
+    } finally {
+      await proxy.close();
+      await gw.close(force: true);
+      await cdn.server.close(force: true);
+    }
+  });
+
+  test('a seek abandons the old read instead of queueing behind it', () async {
+    final data = _file();
+    final cdn = await _FakeCdn.start(data);
+    cdn.delay = const Duration(milliseconds: 150); // a real CDN's time to first byte
+    final gw = await _gateway(cdn, []);
+    final proxy = JavStreamProxy(
+      chunkSize: 512 * 1024,
+      userAgent: _ua,
+      isCloud: (u) => u.port == cdn.server.port,
+    );
+    try {
+      final local = await proxy.wrap('http://127.0.0.1:${gw.port}/emby/videos/cloud/stream.mp4');
+      // mpv starts reading the whole file, takes a little and hangs up (a seek) - three times.
+      for (final from in [0, 4000000, 8000000]) {
+        final client = HttpClient();
+        final req = await client.getUrl(Uri.parse(local));
+        req.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-');
+        final res = await req.close();
+        final got = Completer<void>();
+        late StreamSubscription<List<int>> sub;
+        sub = res.listen((_) {
+          if (!got.isCompleted) got.complete();
+        });
+        await got.future;
+        await sub.cancel();
+        client.close(force: true);
+      }
+      final watch = Stopwatch()..start();
+      final tail = await _get(local, 'bytes=${_size - 100000}-');
+      expect(tail, Uint8List.sublistView(data, _size - 100000));
+      expect(watch.elapsed, lessThan(const Duration(seconds: 3)));
+      // and the abandoned reads stopped pulling chunks from the CDN
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      final settled = cdn.requests;
+      await Future<void>.delayed(const Duration(milliseconds: 800));
+      expect(cdn.requests, settled);
+      expect(cdn.peak, lessThanOrEqualTo(2));
     } finally {
       await proxy.close();
       await gw.close(force: true);
