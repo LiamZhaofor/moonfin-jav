@@ -25,7 +25,7 @@ const javResolveHeader = 'X-Jav-Resolve';
 /// still goes CDN -> this computer; nothing passes through the NAS.
 class JavStreamProxy {
   JavStreamProxy({
-    this.chunkSize = 4 << 20,
+    this.chunkSize = 2 << 20, // ~0.85 s each from here: a seek waits for one
     this.cacheBytes = 96 << 20,
     this.maxUpstream = 2,
     this.userAgent = 'Moonfin-jav/1.0 (libmpv)',
@@ -270,7 +270,7 @@ class JavStreamProxy {
         final data = await _chunk(s, index, demand: true);
         if (data == null || data.isEmpty) break;
         // Keep the next chunks coming while mpv chews on this one.
-        for (var ahead = 1; ahead <= 2; ahead++) {
+        for (var ahead = 1; ahead <= 3; ahead++) {
           unawaited(_chunk(s, index + ahead, demand: false).catchError((_) => null));
         }
         final offset = pos - index * chunkSize;
